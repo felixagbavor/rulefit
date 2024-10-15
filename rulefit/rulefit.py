@@ -614,6 +614,108 @@ class RuleFit(BaseEstimator, TransformerMixin):
         """
         return self.rule_ensemble.transform(X)
 
+    def get_rules(self, exclude_zero_coef=False, subregion=None):
+        """Return the estimated rules
+        Parameters
+        ----------
+        exclude_zero_coef: If True (default), returns only the rules with an estimated
+                           coefficient not equalt to  zero.
+        subregion: If None (default) returns global importances (FP 2004 eq. 28/29), else returns importance over
+                           subregion of inputs (FP 2004 eq. 30/31/32).
+        Returns
+        -------
+        rules: pandas.DataFrame with the rules. Column 'rule' describes the rule, 'coef' holds
+               the coefficients and 'support' the support of the rule in the training
+               data set (X)
+        """
+        n_features= len(self.coef_) - len(self.rule_ensemble.rules)
+        rule_ensemble = list(self.rule_ensemble.rules)
+        output_rules = []
+        ## Add coefficients for linear effects
+        for i in range(0, n_features):
+            if self.lin_standardise:
+                coef=self.coef_[i]*self.friedscale.scale_multipliers[i]
+            else:
+                coef=self.coef_[i]
+            if subregion is None:
+                importance = abs(coef)*self.stddev[i]
+            else:
+                subregion = np.array(subregion)
+                importance = sum(abs(coef)* abs([ x[i] for x in self.winsorizer.trim(subregion) ] - self.mean[i]))/len(subregion)
+            output_rules += [(self.feature_names[i], 'linear',coef, 1, importance)]
+        ## Add rules
+        for i in range(0, len(self.rule_ensemble.rules)):
+            rule = rule_ensemble[i]
+            coef=self.coef_[i + n_features]
+            if subregion is None:
+                importance = abs(coef)*(rule.support * (1-rule.support))**(1/2)
+            else:
+                rkx = rule.transform(subregion)
+                importance = sum(abs(coef) * abs(rkx - rule.support))/len(subregion)
+            output_rules += [(rule.__str__(), 'rule', coef,  rule.support, importance)]
+        rules = pd.DataFrame(output_rules, columns=["rule", "type","coef", "support", "importance"])
+        if exclude_zero_coef:
+            rules = rules.ix[rules.coef != 0]
+        return rules
+    
+    def get_feature_importance(self, exclude_zero_coef=False, subregion=None, scaled=False):
+        """
+        Returns feature importance for input features to RuleFit model.
+        Parameters:
+        -----------
+            exclude_zero_coef: If True, returns only the rules with an estimated
+                           coefficient not equalt to  zero.
+            subregion: If None (default) returns global importances (FP 2004 eq. 28/29), else returns importance over
+                           subregion of inputs (FP 2004 eq. 30/31/32).
+                           
+            scaled: If True, will scale the importances to have a max of 100.
+            
+        Returns:
+        --------
+            return_df (pandas DataFrame): DataFrame for feature names and feature importances (FP 2004 eq. 35)
+        """
+        
+        def find_mk(rule:str):
+            """
+            Finds the number of features in a given rule from the get_rules method.
+            Parameters:
+            -----------
+                rule (str): 
+                
+            Returns:
+            --------
+                var_count (int): 
+            """
+            
+            ## Count the number of features found in a rule
+            feature_count = 0
+            for feature in self.feature_names:
+                if feature in rule:
+                    feature_count += 1
+            return(feature_count)
+        
+        feature_set = self.feature_names
+        rules = self.get_rules(exclude_zero_coef, subregion)
+        
+        # Return an array of counts for features found in rules
+        features_in_rule = rules.rule.apply(lambda x: find_mk(x))
+        feature_imp = list()
+        for feature in feature_set:
+            # Rules where feature is found
+            feature_rk = rules.rule.apply(lambda x: feature in x)
+            # Linear importance array for feature
+            linear_imp = rules[(rules.type=='linear')&(rules.rule==feature)].importance.values
+            # Rule importance array
+            rule_imp = rules[rules.type!='linear'].importance[feature_rk]
+            # Total count of features in each rule feature is found
+            mk_array = features_in_rule[feature_rk]
+            feature_imp.append(float(linear_imp + (rule_imp/mk_array).sum())) # (FP 2004 eq. 35)
+        # Scaled output
+        if scaled:
+            feature_imp = 100*(feature_imp/np.array(feature_imp).max())
+           
+        return_df = pd.DataFrame({'feature':self.feature_names, 'importance':feature_imp})
+        return(return_df)
 
 class RuleFitRegressor(RuleFit, RegressorMixin, TransformerMixin):
     """Rulefit class
